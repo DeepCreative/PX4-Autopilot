@@ -1,0 +1,76 @@
+name: navlab fmu-v6x firmware
+
+# Builds the Pixhawk 6X image the Nav Lab aircraft fly. Every build is
+# traceable: the artifact name carries `git describe`, and tag pushes of the
+# form navlab-v* publish a GitHub release with the .px4 and its sha256.
+#
+# The upstream PX4 workflows are intentionally absent on this branch; they
+# target PX4's own runner pool and do not run on this fork.
+
+on:
+  push:
+    branches:
+      - 'navlab/**'
+    tags:
+      - 'navlab-v*'
+  pull_request:
+    branches:
+      - 'navlab/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: px4_fmu-v6x_default
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install toolchain
+        run: |
+          ./Tools/setup/ubuntu.sh --no-sim-tools
+          arm-none-eabi-gcc --version | head -1
+
+      - name: Build
+        run: make px4_fmu-v6x_default -j"$(nproc)"
+
+      - name: Describe
+        id: describe
+        run: |
+          desc="$(git describe --tags --always --dirty)"
+          echo "desc=${desc}" >> "$GITHUB_OUTPUT"
+          mkdir -p out
+          cp build/px4_fmu-v6x_default/px4_fmu-v6x_default.px4 "out/px4_fmu-v6x_default-${desc}.px4"
+          (cd out && sha256sum "px4_fmu-v6x_default-${desc}.px4" > "px4_fmu-v6x_default-${desc}.px4.sha256")
+          cat out/*.sha256
+          python3 - "out/px4_fmu-v6x_default-${desc}.px4" <<'EOF'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          print({k: d[k] for k in ("board_id", "git_identity", "image_size") if k in d})
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: px4_fmu-v6x_default-${{ steps.describe.outputs.desc }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/navlab-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" out/* \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Pixhawk 6X (px4_fmu-v6x_default) build ${{ steps.describe.outputs.desc }} for the Nav Lab aircraft."
